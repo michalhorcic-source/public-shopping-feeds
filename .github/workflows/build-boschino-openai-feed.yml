@@ -1,110 +1,56 @@
-name: Build Boschino OpenAI Ads feed
+name: Publish Boschino OpenAI Ads feed snapshot
 
 on:
   push:
     branches: [main]
     paths:
-      - '.feed-staging/READY'
+      - '.feed-staging/boschino-ads-full.txt.xz'
 
 permissions:
   contents: write
 
 jobs:
-  build-feed:
+  publish-feed:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Reassemble compact snapshot
+      - name: Decompress and validate full feed
         shell: bash
         run: |
           set -euo pipefail
-          cat .feed-staging/parts/*.b64 > /tmp/boschino-feed.xz.b64
-          base64 -d /tmp/boschino-feed.xz.b64 > /tmp/boschino-feed.tsv.xz
-          xz -dc /tmp/boschino-feed.tsv.xz > /tmp/boschino-feed.tsv
-          test "$(($(wc -l < /tmp/boschino-feed.tsv)-1))" -eq 51819
-
-      - name: Build Ads Manager feed
-        shell: python
-        run: |
-          import csv, pathlib, re
-
-          src = pathlib.Path('/tmp/boschino-feed.tsv')
-          out = pathlib.Path('openai/boschino-ads-full.txt')
-          out.parent.mkdir(parents=True, exist_ok=True)
-
-          fields = [
-              'item_id','title','description','url','brand','image_url','price',
-              'availability','is_eligible_search','is_eligible_checkout',
-              'is_ads_eligible','seller_name','seller_url','gtin','mpn',
-              'product_category','condition'
-          ]
-          shopify_prefix = 'https://cdn.shopify.com/s/files/1/1001/0741/9979/files/'
-          boschino_prefix = 'https://boschino.cz/cdn/shop/files/'
-          placeholder = ('https://boschino.cz/cdn/shop/files/'
-                         'Obrazek_neni_IKONA_BOSCHINO_fab28cee-a44a-4055-a6e0-3dce91058ad4.jpg'
-                         '?v=1775658146&width=1200')
-
-          def expand_image(value):
-              if value.startswith('s:'):
-                  return shopify_prefix + value[2:]
-              if value.startswith('b:'):
-                  return boschino_prefix + value[2:]
-              if value.startswith('u:'):
-                  return value[2:] or placeholder
-              return value or placeholder
-
-          rows = 0
-          ids = set()
-          with src.open(encoding='utf-8', newline='') as fi, out.open('w', encoding='utf-8', newline='') as fo:
-              r = csv.DictReader(fi, delimiter='\t')
-              w = csv.DictWriter(fo, fieldnames=fields, delimiter='\t', lineterminator='\n', quoting=csv.QUOTE_MINIMAL)
-              w.writeheader()
-              for x in r:
-                  item_id = x['i'].strip()
-                  path = x['h'].strip()
-                  title = x['t'].strip()
-                  mpn_match = re.search(r'(?<!\d)(\d{8})(?!\d)', title)
-                  mpn = mpn_match.group(1) if mpn_match else ''
-                  brand = 'Bosch | Siemens' if 'siemens' in title.lower() or 'bosch-siemens' in path.lower() else 'Bosch'
-                  row = {
-                      'item_id': item_id,
-                      'title': title,
-                      'description': f'{title}. Náhradní díl nebo příslušenství pro spotřebiče {brand}. Kompatibilitu ověřte podle úplného E-Nr spotřebiče.',
-                      'url': 'https://boschino.cz' + path,
-                      'brand': brand,
-                      'image_url': expand_image(x['im'].strip()),
-                      'price': x['p'].strip() + ' CZK',
-                      'availability': 'in_stock' if x['a'].strip() == '1' else 'out_of_stock',
-                      'is_eligible_search': 'true',
-                      'is_eligible_checkout': 'false',
-                      'is_ads_eligible': 'true',
-                      'seller_name': 'Boschino.cz',
-                      'seller_url': 'https://boschino.cz',
-                      'gtin': '',
-                      'mpn': mpn,
-                      'product_category': '',
-                      'condition': 'new',
-                  }
-                  if not all(row[k] for k in ('item_id','title','url','image_url','price')):
-                      raise SystemExit(f'Missing required value for {item_id}')
-                  if item_id in ids:
-                      raise SystemExit(f'Duplicate item_id: {item_id}')
-                  ids.add(item_id)
-                  w.writerow(row)
+          mkdir -p openai
+          xz -dc .feed-staging/boschino-ads-full.txt.xz > openai/boschino-ads-full.txt
+          test "$(($(wc -l < openai/boschino-ads-full.txt)-1))" -eq 51819
+          python - <<'PY'
+          import csv
+          path='openai/boschino-ads-full.txt'
+          expected=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
+          with open(path,encoding='utf-8',newline='') as f:
+              r=csv.DictReader(f,delimiter='\t')
+              if r.fieldnames != expected:
+                  raise SystemExit(f'Unexpected columns: {r.fieldnames}')
+              ids=set(); rows=0
+              for row in r:
                   rows += 1
+                  for key in ('item_id','title','url','image_url','price'):
+                      if not row.get(key):
+                          raise SystemExit(f'Missing {key} at row {rows + 1}')
+                  if row['item_id'] in ids:
+                      raise SystemExit(f'Duplicate item_id: {row["item_id"]}')
+                  ids.add(row['item_id'])
+              if rows != 51819:
+                  raise SystemExit(f'Expected 51819 products, got {rows}')
+              print(f'Validated {rows} unique products')
+          PY
 
-          if rows != 51819:
-              raise SystemExit(f'Expected 51819 products, got {rows}')
-          print(f'Built {rows} products: {out.stat().st_size} bytes')
-
-      - name: Publish snapshot and remove staging payload
+      - name: Publish feed and remove staging archive
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf .feed-staging/parts .feed-staging/READY
+          rm -f .feed-staging/boschino-ads-full.txt.xz
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A openai/boschino-ads-full.txt .feed-staging
