@@ -29,7 +29,7 @@ jobs:
       - name: Build Ads Manager feed
         shell: python
         run: |
-          import csv, pathlib
+          import csv, pathlib, re
 
           src = pathlib.Path('/tmp/boschino-feed.tsv')
           out = pathlib.Path('openai/boschino-ads-full.txt')
@@ -66,8 +66,8 @@ jobs:
                   item_id = x['i'].strip()
                   path = x['h'].strip()
                   title = x['t'].strip()
-                  mpn = x['m'].strip()
-                  gtin = x['g'].strip()
+                  mpn_match = re.search(r'(?<!\d)(\d{8})(?!\d)', title)
+                  mpn = mpn_match.group(1) if mpn_match else ''
                   brand = 'Bosch | Siemens' if 'siemens' in title.lower() or 'bosch-siemens' in path.lower() else 'Bosch'
                   row = {
                       'item_id': item_id,
@@ -83,7 +83,7 @@ jobs:
                       'is_ads_eligible': 'true',
                       'seller_name': 'Boschino.cz',
                       'seller_url': 'https://boschino.cz',
-                      'gtin': gtin,
+                      'gtin': '',
                       'mpn': mpn,
                       'product_category': '',
                       'condition': 'new',
