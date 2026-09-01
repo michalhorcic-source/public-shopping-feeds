@@ -29,7 +29,7 @@ jobs:
       - name: Build Ads Manager feed
         shell: python
         run: |
-          import csv, re, urllib.parse, pathlib
+          import csv, pathlib
 
           src = pathlib.Path('/tmp/boschino-feed.tsv')
           out = pathlib.Path('openai/boschino-ads-full.txt')
@@ -56,17 +56,6 @@ jobs:
                   return value[2:] or placeholder
               return value or placeholder
 
-          def make_title(item_id, path):
-              handle = path.rstrip('/').split('/')[-1]
-              text = handle.replace('-', ' ').strip()
-              text = re.sub(r'\s+', ' ', text)
-              if item_id.startswith('p-'):
-                  return text[:180]
-              mpn = item_id.split('-', 1)[0]
-              if mpn.isdigit() and len(mpn) == 8 and not text.startswith(mpn):
-                  text = mpn + ' ' + text
-              return text[:180]
-
           rows = 0
           ids = set()
           with src.open(encoding='utf-8', newline='') as fi, out.open('w', encoding='utf-8', newline='') as fo:
@@ -76,9 +65,10 @@ jobs:
               for x in r:
                   item_id = x['i'].strip()
                   path = x['h'].strip()
-                  title = make_title(item_id, path)
-                  mpn = item_id.split('-', 1)[0] if re.match(r'^\d{8}(?:-|$)', item_id) else ''
-                  brand = 'Bosch | Siemens' if 'bosch-siemens' in path.lower() else 'Bosch'
+                  title = x['t'].strip()
+                  mpn = x['m'].strip()
+                  gtin = x['g'].strip()
+                  brand = 'Bosch | Siemens' if 'siemens' in title.lower() or 'bosch-siemens' in path.lower() else 'Bosch'
                   row = {
                       'item_id': item_id,
                       'title': title,
@@ -93,7 +83,7 @@ jobs:
                       'is_ads_eligible': 'true',
                       'seller_name': 'Boschino.cz',
                       'seller_url': 'https://boschino.cz',
-                      'gtin': '',
+                      'gtin': gtin,
                       'mpn': mpn,
                       'product_category': '',
                       'condition': 'new',
