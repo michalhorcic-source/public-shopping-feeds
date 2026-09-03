@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.feed-staging/boschino-sk-ads-full.txt.xz'
+      - '.github/workflows/publish-boschino-sk-openai-feed.yml'
 
 permissions:
   contents: write
@@ -22,6 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p openai
+          test -s .feed-staging/boschino-sk-ads-full.txt.xz
           xz -dc .feed-staging/boschino-sk-ads-full.txt.xz > openai/boschino-sk-ads-full.txt
 
           python - <<'PY'
