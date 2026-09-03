@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build full SK feed via public Storefront API
+      - name: Build full SK feed from sitemap and Storefront API
         shell: bash
         run: |
           set -euo pipefail
@@ -31,32 +31,36 @@ jobs:
           import time
           import urllib.parse
           import urllib.request
+          import xml.etree.ElementTree as ET
 
           BASE='https://boschino.sk'
           COLLECTION_URL=BASE + '/collections/spotrebny-material-pre-vysavace'
           GRAPHQL_URL=BASE + '/api/2024-10/graphql.json'
           OUT='/tmp/out/boschino-sk-ads-full.txt'
+          BATCH_SIZE=100
           FIELDS=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
 
-          def fetch_text(url, attempts=4):
+          def fetch_bytes(url, attempts=5, accept='*/*'):
               last=None
               for attempt in range(attempts):
                   try:
                       req=urllib.request.Request(url, headers={
                           'User-Agent':'Mozilla/5.0 (compatible; BoschinoFeedBuilder/1.0)',
-                          'Accept':'text/html,application/javascript,*/*',
+                          'Accept':accept,
                           'Accept-Language':'sk-SK,sk;q=0.9'
                       })
-                      with urllib.request.urlopen(req, timeout=60) as r:
-                          return r.read().decode('utf-8', errors='replace')
+                      with urllib.request.urlopen(req, timeout=90) as r:
+                          return r.read()
                   except Exception as e:
                       last=e
-                      time.sleep(2*(attempt+1))
+                      time.sleep(min(15,2*(attempt+1)))
               raise last
 
-          # Storefront access tokens are intentionally present in browser JS.
-          # Read the current token dynamically so no credential is stored in this repository.
-          html=fetch_text(COLLECTION_URL)
+          def fetch_text(url, attempts=5, accept='*/*'):
+              return fetch_bytes(url, attempts, accept).decode('utf-8', errors='replace')
+
+          # Discover the current public Storefront token from the current theme JS.
+          html=fetch_text(COLLECTION_URL, accept='text/html,*/*')
           urls=[]
           for m in re.finditer(r'''(?:src|href)=["']([^"']+\.js(?:\?[^"']*)?)["']''', html, re.I):
               u=m.group(1)
@@ -68,58 +72,89 @@ jobs:
                   u=urllib.parse.urljoin(BASE+'/',u)
               urls.append(u)
 
-          asset_urls=[u for u in urls if 'product-grid-filtr' in u]
-          if not asset_urls:
-              # Fallback: inspect all page JS assets until the public Storefront constant is found.
-              asset_urls=urls
-
+          asset_urls=[u for u in urls if 'product-grid-filtr' in u] or urls
           token=None
           for asset_url in asset_urls:
               try:
-                  js=fetch_text(asset_url, attempts=2)
+                  js=fetch_text(asset_url, attempts=2, accept='application/javascript,*/*')
               except Exception:
                   continue
               m=re.search(r'''SHOPIFY_STOREFRONT_TOKEN\s*=\s*["']([^"']+)["']''', js)
               if m:
                   token=m.group(1)
-                  print('Found public Storefront token in current theme asset:', asset_url.split('?')[0])
+                  print('Found current public Storefront token in theme asset:',asset_url.split('?')[0])
                   break
-
           if not token:
-              raise SystemExit('Could not discover current public Shopify Storefront token from Boschino.sk theme assets')
+              raise SystemExit('Could not discover current public Shopify Storefront token')
 
-          query=r'''
-          query ProductsForOpenAI($cursor: String) @inContext(country: SK, language: SK) {
-            products(first: 250, after: $cursor, sortKey: ID) {
-              pageInfo { hasNextPage endCursor }
+          # Shopify product connection has a 25k traversal limit. Use the Shopify sitemap
+          # as the authoritative public list of published product handles, then fetch them
+          # from Storefront API in alias batches.
+          sitemap_index=fetch_bytes(BASE+'/sitemap.xml', accept='application/xml,text/xml,*/*')
+          root=ET.fromstring(sitemap_index)
+          sitemap_urls=[]
+          for elem in root.iter():
+              if elem.tag.endswith('loc') and elem.text:
+                  u=elem.text.strip()
+                  if 'sitemap_products_' in u:
+                      sitemap_urls.append(u)
+          if not sitemap_urls:
+              raise SystemExit('No product sitemaps found in sitemap.xml')
+          print('Product sitemap files=',len(sitemap_urls))
+
+          handles=[]
+          seen_handles=set()
+          for si,u in enumerate(sitemap_urls,1):
+              data=fetch_bytes(u, accept='application/xml,text/xml,*/*')
+              sr=ET.fromstring(data)
+              count_before=len(handles)
+              for elem in sr.iter():
+                  if not elem.tag.endswith('loc') or not elem.text:
+                      continue
+                  loc=elem.text.strip()
+                  p=urllib.parse.urlsplit(loc)
+                  marker='/products/'
+                  if marker not in p.path:
+                      continue
+                  handle=p.path.split(marker,1)[1].split('/',1)[0].strip()
+                  handle=urllib.parse.unquote(handle)
+                  if handle and handle not in seen_handles:
+                      seen_handles.add(handle)
+                      handles.append(handle)
+              print(f'Sitemap {si}/{len(sitemap_urls)} added={len(handles)-count_before} total_handles={len(handles)}')
+
+          if len(handles)<1000:
+              raise SystemExit(f'Refusing suspiciously small product sitemap: {len(handles)} handles')
+
+          fragment=r'''
+          fragment PF on Product {
+            handle
+            title
+            description
+            vendor
+            productType
+            featuredImage { url }
+            variants(first: 10) {
+              pageInfo { hasNextPage }
               nodes {
                 id
-                handle
                 title
-                description
-                vendor
-                productType
-                featuredImage { url }
-                variants(first: 10) {
-                  pageInfo { hasNextPage }
-                  nodes {
-                    id
-                    title
-                    sku
-                    barcode
-                    availableForSale
-                    price { amount currencyCode }
-                    compareAtPrice { amount currencyCode }
-                    image { url }
-                  }
-                }
+                sku
+                barcode
+                availableForSale
+                price { amount currencyCode }
+                image { url }
               }
             }
           }
           '''
 
-          def gql(cursor, attempts=5):
-              body=json.dumps({'query':query,'variables':{'cursor':cursor}}).encode('utf-8')
+          def query_batch(batch, attempts=5):
+              aliases=[]
+              for i,handle in enumerate(batch):
+                  aliases.append(f'p{i}: product(handle: {json.dumps(handle)}) {{ ...PF }}')
+              query='query @inContext(country: SK, language: SK) {\n'+'\n'.join(aliases)+'\n}\n'+fragment
+              body=json.dumps({'query':query}).encode('utf-8')
               last=None
               for attempt in range(attempts):
                   try:
@@ -134,35 +169,39 @@ jobs:
                           },
                           method='POST'
                       )
-                      with urllib.request.urlopen(req, timeout=90) as r:
+                      with urllib.request.urlopen(req, timeout=120) as r:
                           payload=json.loads(r.read().decode('utf-8'))
                       if payload.get('errors'):
-                          raise RuntimeError(json.dumps(payload['errors'], ensure_ascii=False)[:2000])
-                      return payload
+                          raise RuntimeError(json.dumps(payload['errors'],ensure_ascii=False)[:3000])
+                      return payload.get('data') or {}
                   except Exception as e:
                       last=e
-                      time.sleep(min(15,2*(attempt+1)))
+                      time.sleep(min(20,2*(attempt+1)))
               raise last
 
           rows=[]
           seen_ids=set()
-          cursor=None
-          page=0
-          multi_variant_overflow=0
+          missing_products=0
           missing_image=0
           skipped_bad_price=0
+          multi_variant_overflow=0
           currency_counts={}
           sample=[]
 
-          while True:
-              page += 1
-              payload=gql(cursor)
-              conn=((payload.get('data') or {}).get('products') or {})
-              products=conn.get('nodes') or []
-              print(f'GraphQL page={page} products={len(products)} accumulated_rows={len(rows)}')
+          total_batches=(len(handles)+BATCH_SIZE-1)//BATCH_SIZE
+          for start in range(0,len(handles),BATCH_SIZE):
+              batch=handles[start:start+BATCH_SIZE]
+              batch_no=start//BATCH_SIZE+1
+              data=query_batch(batch)
+              if batch_no==1 or batch_no%10==0 or batch_no==total_batches:
+                  print(f'Batch {batch_no}/{total_batches}; handles_done={min(start+BATCH_SIZE,len(handles))}; rows={len(rows)}')
 
-              for product in products:
-                  handle=str(product.get('handle') or '').strip()
+              for i,requested_handle in enumerate(batch):
+                  product=data.get(f'p{i}')
+                  if not product:
+                      missing_products += 1
+                      continue
+                  handle=str(product.get('handle') or requested_handle).strip()
                   title=str(product.get('title') or '').strip()
                   description=str(product.get('description') or '').strip() or title
                   brand=str(product.get('vendor') or '').strip()
@@ -177,7 +216,6 @@ jobs:
                   vconn=product.get('variants') or {}
                   if (vconn.get('pageInfo') or {}).get('hasNextPage'):
                       multi_variant_overflow += 1
-
                   for variant in vconn.get('nodes') or []:
                       gid=str(variant.get('id') or '')
                       m=re.search(r'/ProductVariant/(\d+)$',gid)
@@ -197,7 +235,7 @@ jobs:
                       except Exception:
                           skipped_bad_price += 1
                           continue
-                      if price_num <= 0 or currency != 'EUR':
+                      if price_num<=0 or currency!='EUR':
                           skipped_bad_price += 1
                           continue
 
@@ -207,7 +245,7 @@ jobs:
                           continue
 
                       vtitle=str(variant.get('title') or '').strip()
-                      final_title=title if not vtitle or vtitle == 'Default Title' else f'{title} - {vtitle}'
+                      final_title=title if not vtitle or vtitle=='Default Title' else f'{title} - {vtitle}'
                       sku=str(variant.get('sku') or '').strip()
                       barcode=str(variant.get('barcode') or '').strip()
                       mpn=sku
@@ -239,27 +277,17 @@ jobs:
                       seen_ids.add(item_id)
                       if len(sample)<5:
                           sample.append((item_id,final_title,row['price'],row['availability'],row['url']))
-
-              page_info=conn.get('pageInfo') or {}
-              if not page_info.get('hasNextPage'):
-                  break
-              cursor=page_info.get('endCursor')
-              if not cursor:
-                  raise SystemExit('Shopify reported next page but no cursor')
-              if page>1000:
-                  raise SystemExit('Safety stop: too many GraphQL pages')
-              time.sleep(0.12)
+              time.sleep(0.03)
 
           if len(rows)<1000:
               raise SystemExit(f'Refusing suspiciously small transformed feed: {len(rows)} rows')
-          if currency_counts.get('EUR',0)<len(rows):
-              print('Currency counts:',currency_counts)
-
           for x in sample:
               print('SAMPLE',x)
-          print('multi_variant_overflow=',multi_variant_overflow)
+          print('handles=',len(handles))
+          print('missing_products=',missing_products)
           print('missing_image=',missing_image)
           print('skipped_bad_price=',skipped_bad_price)
+          print('multi_variant_overflow=',multi_variant_overflow)
           print('currency_counts=',currency_counts)
 
           with open(OUT,'w',encoding='utf-8',newline='') as f:
