@@ -13,47 +13,56 @@ permissions:
 jobs:
   publish-sk-feed:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Regenerate full Boschino SK Merchant feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 1 --connect-timeout 20 --max-time 1200 \
+            'https://boschino-feed-worker.michal-horcic.workers.dev/admin/regenerate-all' \
+            -o /tmp/boschino-sk-regenerate.json
+
+          python - <<'PY'
+          import json
+          p='/tmp/boschino-sk-regenerate.json'
+          with open(p, encoding='utf-8') as f:
+              data=json.load(f)
+          print(data)
+          rows=int(data.get('rows') or 0)
+          products=int(data.get('products') or 0)
+          if not data.get('ok') or rows < 1000:
+              raise SystemExit(f'Full SK regeneration failed or too small: products={products}, rows={rows}')
+          print(f'Full SK regeneration OK: products={products}, rows={rows}')
+          PY
+
       - name: Fetch current Boschino SK Merchant feed
         shell: bash
         run: |
           set -euo pipefail
-          sources=(
-            'https://feed.boschino.sk/merchant/sk/products.tsv'
-            'https://boschino-feed-worker.michal-horcic.workers.dev/merchant/sk/products.tsv'
-            'https://michalhorcic-source.github.io/sk_boschino_feed_merchant/merchant/sk/products.tsv'
-          )
+          source_url='https://boschino-feed-worker.michal-horcic.workers.dev/merchant/sk/products.tsv'
+          curl -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 300 \
+            "$source_url" -o /tmp/boschino-sk-source.tsv
 
-          rm -f /tmp/boschino-sk-source.tsv
-          for source_url in "${sources[@]}"; do
-            echo "Trying ${source_url}"
-            if curl -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 180 \
-              "$source_url" -o /tmp/boschino-sk-candidate.tsv; then
-              if python - <<'PY'
+          python - <<'PY'
           import csv
-          p='/tmp/boschino-sk-candidate.tsv'
+          p='/tmp/boschino-sk-source.tsv'
           with open(p, encoding='utf-8-sig', newline='') as f:
               r=csv.DictReader(f, delimiter='\t')
               fields=set(r.fieldnames or [])
+              rows=sum(1 for _ in r)
           required_any=[{'id','item_id'}, {'title'}, {'link','url'}, {'image_link','image_url'}, {'price'}]
           ok=all(bool(fields & group) for group in required_any)
-          raise SystemExit(0 if ok else 1)
+          if not ok:
+              raise SystemExit(f'Unsupported SK feed header: {sorted(fields)}')
+          if rows < 1000:
+              raise SystemExit(f'Refusing suspiciously small SK source feed: {rows} rows')
+          print(f'SK source rows={rows}')
           PY
-              then
-                mv /tmp/boschino-sk-candidate.tsv /tmp/boschino-sk-source.tsv
-                echo "$source_url" > /tmp/boschino-sk-source-url.txt
-                break
-              fi
-            fi
-          done
-
-          test -s /tmp/boschino-sk-source.tsv
-          echo "Using source: $(cat /tmp/boschino-sk-source-url.txt)"
 
       - name: Transform to OpenAI Ads feed schema
         shell: bash
