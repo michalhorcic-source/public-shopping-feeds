@@ -1,0 +1,154 @@
+name: Build Boschino SK OpenAI feed snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-boschino-sk-snapshot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch full SK Merchant feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidates=(
+            'https://michalhorcic-source.github.io/sk_boschino_feed_merchant/merchant/sk/products.tsv'
+            'https://raw.githubusercontent.com/michalhorcic-source/sk_boschino_feed_merchant/main/dist/merchant/sk/products.tsv'
+            'https://raw.githubusercontent.com/michalhorcic-source/sk_boschino_feed_merchant/main/merchant/sk/products.tsv'
+            'https://feed.boschino.sk/merchant/sk/products.tsv'
+          )
+
+          rm -f /tmp/sk-source.tsv
+          for url in "${candidates[@]}"; do
+            echo "Trying $url"
+            if curl -fL --retry 1 --connect-timeout 15 --max-time 300 "$url" -o /tmp/candidate.tsv; then
+              rows=$(($(wc -l < /tmp/candidate.tsv)-1))
+              echo "Candidate rows: $rows"
+              if [ "$rows" -ge 1000 ]; then
+                mv /tmp/candidate.tsv /tmp/sk-source.tsv
+                echo "$url" > /tmp/sk-source-url.txt
+                break
+              fi
+            fi
+          done
+
+          test -s /tmp/sk-source.tsv
+          echo "Using source: $(cat /tmp/sk-source-url.txt)"
+
+      - name: Transform to OpenAI Ads schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out .feed-staging
+          python - <<'PY'
+          import csv, re
+          from urllib.parse import urlsplit, urlunsplit
+
+          src='/tmp/sk-source.tsv'
+          out='/tmp/out/boschino-sk-ads-full.txt'
+          fields=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
+
+          def clean(v):
+              return str(v or '').replace('\x00','').strip()
+
+          def canon_url(v):
+              v=clean(v)
+              if not v:
+                  return ''
+              p=urlsplit(v)
+              return urlunsplit((p.scheme,p.netloc,p.path,'',''))
+
+          def availability(v):
+              s=clean(v).lower().replace('-','_').replace(' ','_')
+              if s in {'in_stock','instock'} or 'sklad' in s:
+                  return 'in_stock'
+              return 'out_of_stock'
+
+          rows=[]
+          seen=set()
+          with open(src,encoding='utf-8-sig',newline='') as f:
+              r=csv.DictReader(f,delimiter='\t')
+              for row in r:
+                  item_id=clean(row.get('item_id') or row.get('id'))
+                  if not item_id or item_id in seen:
+                      continue
+                  title=clean(row.get('title'))
+                  description=clean(row.get('description')) or title
+                  url=canon_url(row.get('url') or row.get('link'))
+                  image=clean(row.get('image_url') or row.get('image_link'))
+                  price=clean(row.get('sale_price')) or clean(row.get('price'))
+                  if price and not re.search(r'\bEUR\b', price, re.I):
+                      m=re.search(r'([0-9]+(?:[.,][0-9]+)?)', price)
+                      if m:
+                          price=m.group(1).replace(',','.')+' EUR'
+                  if not (title and url and image and price):
+                      continue
+                  if 'boschino.sk' not in url:
+                      continue
+                  brand=clean(row.get('brand'))
+                  if brand in {'BSH / Bosch','Boschino.cz','Boschino.sk'}:
+                      brand='Bosch'
+                  elif brand == 'BSH - Bosch, Siemens':
+                      brand='Bosch | Siemens'
+                  gtin=clean(row.get('gtin'))
+                  mpn=clean(row.get('mpn'))
+                  if not mpn:
+                      m=re.search(r'(?<!\d)(\d{8})(?!\d)',title)
+                      if m:
+                          mpn=m.group(1)
+                  rows.append({
+                      'item_id':item_id,
+                      'title':title,
+                      'description':description,
+                      'url':url,
+                      'brand':brand,
+                      'image_url':image,
+                      'price':price,
+                      'availability':availability(row.get('availability')),
+                      'is_eligible_search':'true',
+                      'is_eligible_checkout':'false',
+                      'is_ads_eligible':'true',
+                      'seller_name':'Boschino.sk',
+                      'seller_url':'https://boschino.sk',
+                      'gtin':gtin,
+                      'mpn':mpn,
+                      'product_category':clean(row.get('product_type') or row.get('product_category') or row.get('google_product_category')),
+                      'condition':'new'
+                  })
+                  seen.add(item_id)
+
+          if len(rows) < 1000:
+              raise SystemExit(f'Refusing suspiciously small transformed feed: {len(rows)} rows')
+
+          with open(out,'w',encoding='utf-8',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields,delimiter='\t',lineterminator='\n')
+              w.writeheader(); w.writerows(rows)
+
+          ins=sum(1 for x in rows if x['availability']=='in_stock')
+          print(f'Validated {len(rows)} unique SK products; in_stock={ins}; out_of_stock={len(rows)-ins}')
+          PY
+
+          xz -c -9 /tmp/out/boschino-sk-ads-full.txt > .feed-staging/boschino-sk-ads-full.txt.xz
+          ls -lh /tmp/out/boschino-sk-ads-full.txt .feed-staging/boschino-sk-ads-full.txt.xz
+
+      - name: Commit staging snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .feed-staging/boschino-sk-ads-full.txt.xz
+          git commit -m 'Stage Boschino SK OpenAI Ads feed snapshot'
+          git push origin HEAD:main
