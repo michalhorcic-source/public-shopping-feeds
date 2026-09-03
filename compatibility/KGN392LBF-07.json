@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "enr": "KGN392LBF/07",
+  "normalized_enr": "KGN392LBF/07",
+  "match": "exact",
+  "products": [
+    {
+      "part_number": "11047860",
+      "title": "Police dveří k lednici",
+      "url": "https://boschino.cz/products/11047860-police-dveri-do-lednice-bosch-siemens",
+      "brand": "Bosch",
+      "part_type": "door_shelf"
+    }
+  ],
+  "source": "manual_test_fixture",
+  "note": "Test fixture for validating ChatGPT compatibility lookup before connecting the resolver to Supabase."
+}
