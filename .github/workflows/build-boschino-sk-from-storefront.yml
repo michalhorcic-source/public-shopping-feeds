@@ -19,179 +19,248 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch SK products and build OpenAI feed
+      - name: Build full SK feed via public Storefront API
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/out .feed-staging
           python - <<'PY'
           import csv
-          import html
           import json
           import re
           import time
+          import urllib.parse
           import urllib.request
-          from html.parser import HTMLParser
 
           BASE='https://boschino.sk'
+          COLLECTION_URL=BASE + '/collections/spotrebny-material-pre-vysavace'
+          GRAPHQL_URL=BASE + '/api/2024-10/graphql.json'
           OUT='/tmp/out/boschino-sk-ads-full.txt'
           FIELDS=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
 
-          class TextExtractor(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.parts=[]
-              def handle_data(self, data):
-                  if data and data.strip():
-                      self.parts.append(data.strip())
-
-          def strip_html(value):
-              p=TextExtractor()
-              try:
-                  p.feed(value or '')
-                  text=' '.join(p.parts)
-              except Exception:
-                  text=re.sub(r'<[^>]+>', ' ', value or '')
-              return re.sub(r'\s+', ' ', html.unescape(text)).strip()
-
-          def get_json(url, attempts=4):
+          def fetch_text(url, attempts=4):
               last=None
               for attempt in range(attempts):
                   try:
                       req=urllib.request.Request(url, headers={
                           'User-Agent':'Mozilla/5.0 (compatible; BoschinoFeedBuilder/1.0)',
-                          'Accept':'application/json',
+                          'Accept':'text/html,application/javascript,*/*',
                           'Accept-Language':'sk-SK,sk;q=0.9'
                       })
                       with urllib.request.urlopen(req, timeout=60) as r:
-                          return json.loads(r.read().decode('utf-8'))
+                          return r.read().decode('utf-8', errors='replace')
                   except Exception as e:
                       last=e
                       time.sleep(2*(attempt+1))
               raise last
 
-          products=[]
-          seen_product_ids=set()
-          page=1
-          while True:
-              url=f'{BASE}/products.json?limit=250&page={page}'
-              payload=get_json(url)
-              batch=payload.get('products') or []
-              print(f'page={page} products={len(batch)}')
-              if not batch:
+          # Storefront access tokens are intentionally present in browser JS.
+          # Read the current token dynamically so no credential is stored in this repository.
+          html=fetch_text(COLLECTION_URL)
+          urls=[]
+          for m in re.finditer(r'''(?:src|href)=["']([^"']+\.js(?:\?[^"']*)?)["']''', html, re.I):
+              u=m.group(1)
+              if u.startswith('//'):
+                  u='https:'+u
+              elif u.startswith('/'):
+                  u=BASE+u
+              elif not u.startswith('http'):
+                  u=urllib.parse.urljoin(BASE+'/',u)
+              urls.append(u)
+
+          asset_urls=[u for u in urls if 'product-grid-filtr' in u]
+          if not asset_urls:
+              # Fallback: inspect all page JS assets until the public Storefront constant is found.
+              asset_urls=urls
+
+          token=None
+          for asset_url in asset_urls:
+              try:
+                  js=fetch_text(asset_url, attempts=2)
+              except Exception:
+                  continue
+              m=re.search(r'''SHOPIFY_STOREFRONT_TOKEN\s*=\s*["']([^"']+)["']''', js)
+              if m:
+                  token=m.group(1)
+                  print('Found public Storefront token in current theme asset:', asset_url.split('?')[0])
                   break
 
-              new=0
-              for product in batch:
-                  pid=str(product.get('id') or '').strip()
-                  if not pid or pid in seen_product_ids:
-                      continue
-                  seen_product_ids.add(pid)
-                  products.append(product)
-                  new += 1
+          if not token:
+              raise SystemExit('Could not discover current public Shopify Storefront token from Boschino.sk theme assets')
 
-              if new == 0:
-                  print('No new product IDs; pagination ended.')
-                  break
-              if len(batch) < 250:
-                  break
-              page += 1
-              if page > 1000:
-                  raise SystemExit('Safety stop: too many pages')
-              time.sleep(0.15)
+          query=r'''
+          query ProductsForOpenAI($cursor: String) @inContext(country: SK, language: SK) {
+            products(first: 250, after: $cursor, sortKey: ID) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                id
+                handle
+                title
+                description
+                vendor
+                productType
+                featuredImage { url }
+                variants(first: 10) {
+                  pageInfo { hasNextPage }
+                  nodes {
+                    id
+                    title
+                    sku
+                    barcode
+                    availableForSale
+                    price { amount currencyCode }
+                    compareAtPrice { amount currencyCode }
+                    image { url }
+                  }
+                }
+              }
+            }
+          }
+          '''
 
-          print(f'Fetched products={len(products)}')
-          if len(products) < 1000:
-              raise SystemExit(f'Refusing suspiciously small storefront catalog: {len(products)} products')
+          def gql(cursor, attempts=5):
+              body=json.dumps({'query':query,'variables':{'cursor':cursor}}).encode('utf-8')
+              last=None
+              for attempt in range(attempts):
+                  try:
+                      req=urllib.request.Request(
+                          GRAPHQL_URL,
+                          data=body,
+                          headers={
+                              'Content-Type':'application/json',
+                              'Accept':'application/json',
+                              'X-Shopify-Storefront-Access-Token':token,
+                              'User-Agent':'BoschinoFeedBuilder/1.0'
+                          },
+                          method='POST'
+                      )
+                      with urllib.request.urlopen(req, timeout=90) as r:
+                          payload=json.loads(r.read().decode('utf-8'))
+                      if payload.get('errors'):
+                          raise RuntimeError(json.dumps(payload['errors'], ensure_ascii=False)[:2000])
+                      return payload
+                  except Exception as e:
+                      last=e
+                      time.sleep(min(15,2*(attempt+1)))
+              raise last
 
           rows=[]
           seen_ids=set()
+          cursor=None
+          page=0
+          multi_variant_overflow=0
+          missing_image=0
+          skipped_bad_price=0
+          currency_counts={}
           sample=[]
-          for product in products:
-              handle=str(product.get('handle') or '').strip()
-              title=str(product.get('title') or '').strip()
-              description=strip_html(product.get('body_html') or '') or title
-              vendor=str(product.get('vendor') or '').strip()
-              product_type=str(product.get('product_type') or '').strip()
-              images=product.get('images') or []
-              product_image=''
-              if images and isinstance(images[0], dict):
-                  product_image=str(images[0].get('src') or '').strip()
 
-              brand=vendor
-              if brand in {'BSH / Bosch','Boschino.cz','Boschino.sk'}:
-                  brand='Bosch'
-              elif brand == 'BSH - Bosch, Siemens':
-                  brand='Bosch | Siemens'
+          while True:
+              page += 1
+              payload=gql(cursor)
+              conn=((payload.get('data') or {}).get('products') or {})
+              products=conn.get('nodes') or []
+              print(f'GraphQL page={page} products={len(products)} accumulated_rows={len(rows)}')
 
-              variants=product.get('variants') or []
-              for variant in variants:
-                  vid=str(variant.get('id') or '').strip()
-                  if not vid:
-                      continue
-                  item_id=f'shopify_SK_{vid}'
-                  if item_id in seen_ids:
-                      continue
+              for product in products:
+                  handle=str(product.get('handle') or '').strip()
+                  title=str(product.get('title') or '').strip()
+                  description=str(product.get('description') or '').strip() or title
+                  brand=str(product.get('vendor') or '').strip()
+                  product_type=str(product.get('productType') or '').strip()
+                  featured=((product.get('featuredImage') or {}).get('url') or '').strip()
 
-                  vtitle=str(variant.get('title') or '').strip()
-                  final_title=title if not vtitle or vtitle == 'Default Title' else f'{title} - {vtitle}'
-                  price=str(variant.get('price') or '').strip()
-                  if not price:
-                      continue
-                  try:
-                      price_num=float(price)
-                  except Exception:
-                      continue
-                  if price_num <= 0:
-                      continue
-                  price_value=f'{price_num:.2f} EUR'
+                  if brand in {'BSH / Bosch','Boschino.cz','Boschino.sk'}:
+                      brand='Bosch'
+                  elif brand == 'BSH - Bosch, Siemens':
+                      brand='Bosch | Siemens'
 
-                  vimage=product_image
-                  fi=variant.get('featured_image')
-                  if isinstance(fi, dict) and fi.get('src'):
-                      vimage=str(fi.get('src')).strip()
-                  if not vimage:
-                      continue
+                  vconn=product.get('variants') or {}
+                  if (vconn.get('pageInfo') or {}).get('hasNextPage'):
+                      multi_variant_overflow += 1
 
-                  sku=str(variant.get('sku') or '').strip()
-                  barcode=str(variant.get('barcode') or '').strip()
-                  mpn=sku
-                  if not mpn:
-                      m=re.search(r'(?<!\d)(\d{8})(?!\d)', final_title)
-                      if m:
-                          mpn=m.group(1)
+                  for variant in vconn.get('nodes') or []:
+                      gid=str(variant.get('id') or '')
+                      m=re.search(r'/ProductVariant/(\d+)$',gid)
+                      if not m:
+                          continue
+                      vid=m.group(1)
+                      item_id=f'shopify_SK_{vid}'
+                      if item_id in seen_ids:
+                          continue
 
-                  available=bool(variant.get('available'))
-                  product_url=f'{BASE}/products/{handle}'
-                  row={
-                      'item_id':item_id,
-                      'title':final_title,
-                      'description':description,
-                      'url':product_url,
-                      'brand':brand,
-                      'image_url':vimage,
-                      'price':price_value,
-                      'availability':'in_stock' if available else 'out_of_stock',
-                      'is_eligible_search':'true',
-                      'is_eligible_checkout':'false',
-                      'is_ads_eligible':'true',
-                      'seller_name':'Boschino.sk',
-                      'seller_url':BASE,
-                      'gtin':barcode,
-                      'mpn':mpn,
-                      'product_category':product_type,
-                      'condition':'new'
-                  }
-                  rows.append(row)
-                  seen_ids.add(item_id)
-                  if len(sample) < 5:
-                      sample.append((item_id, final_title, price_value, available, product_url))
+                      price=variant.get('price') or {}
+                      amount=str(price.get('amount') or '').strip()
+                      currency=str(price.get('currencyCode') or '').strip().upper()
+                      currency_counts[currency]=currency_counts.get(currency,0)+1
+                      try:
+                          price_num=float(amount)
+                      except Exception:
+                          skipped_bad_price += 1
+                          continue
+                      if price_num <= 0 or currency != 'EUR':
+                          skipped_bad_price += 1
+                          continue
 
-          if len(rows) < 1000:
+                      image=((variant.get('image') or {}).get('url') or '').strip() or featured
+                      if not image:
+                          missing_image += 1
+                          continue
+
+                      vtitle=str(variant.get('title') or '').strip()
+                      final_title=title if not vtitle or vtitle == 'Default Title' else f'{title} - {vtitle}'
+                      sku=str(variant.get('sku') or '').strip()
+                      barcode=str(variant.get('barcode') or '').strip()
+                      mpn=sku
+                      if not mpn:
+                          mm=re.search(r'(?<!\d)(\d{8})(?!\d)',final_title)
+                          if mm:
+                              mpn=mm.group(1)
+
+                      row={
+                          'item_id':item_id,
+                          'title':final_title,
+                          'description':description,
+                          'url':f'{BASE}/products/{handle}',
+                          'brand':brand,
+                          'image_url':image,
+                          'price':f'{price_num:.2f} EUR',
+                          'availability':'in_stock' if bool(variant.get('availableForSale')) else 'out_of_stock',
+                          'is_eligible_search':'true',
+                          'is_eligible_checkout':'false',
+                          'is_ads_eligible':'true',
+                          'seller_name':'Boschino.sk',
+                          'seller_url':BASE,
+                          'gtin':barcode,
+                          'mpn':mpn,
+                          'product_category':product_type,
+                          'condition':'new'
+                      }
+                      rows.append(row)
+                      seen_ids.add(item_id)
+                      if len(sample)<5:
+                          sample.append((item_id,final_title,row['price'],row['availability'],row['url']))
+
+              page_info=conn.get('pageInfo') or {}
+              if not page_info.get('hasNextPage'):
+                  break
+              cursor=page_info.get('endCursor')
+              if not cursor:
+                  raise SystemExit('Shopify reported next page but no cursor')
+              if page>1000:
+                  raise SystemExit('Safety stop: too many GraphQL pages')
+              time.sleep(0.12)
+
+          if len(rows)<1000:
               raise SystemExit(f'Refusing suspiciously small transformed feed: {len(rows)} rows')
+          if currency_counts.get('EUR',0)<len(rows):
+              print('Currency counts:',currency_counts)
 
           for x in sample:
-              print('SAMPLE', x)
+              print('SAMPLE',x)
+          print('multi_variant_overflow=',multi_variant_overflow)
+          print('missing_image=',missing_image)
+          print('skipped_bad_price=',skipped_bad_price)
+          print('currency_counts=',currency_counts)
 
           with open(OUT,'w',encoding='utf-8',newline='') as f:
               w=csv.DictWriter(f,fieldnames=FIELDS,delimiter='\t',lineterminator='\n')
