@@ -35,15 +35,15 @@ jobs:
             if curl -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 180 \
               "$source_url" -o /tmp/boschino-sk-candidate.tsv; then
               if python - <<'PY'
-import csv
-p='/tmp/boschino-sk-candidate.tsv'
-with open(p, encoding='utf-8-sig', newline='') as f:
-    r=csv.DictReader(f, delimiter='\t')
-    fields=set(r.fieldnames or [])
-required_any=[{'id','item_id'}, {'title'}, {'link','url'}, {'image_link','image_url'}, {'price'}]
-ok=all(bool(fields & group) for group in required_any)
-raise SystemExit(0 if ok else 1)
-PY
+          import csv
+          p='/tmp/boschino-sk-candidate.tsv'
+          with open(p, encoding='utf-8-sig', newline='') as f:
+              r=csv.DictReader(f, delimiter='\t')
+              fields=set(r.fieldnames or [])
+          required_any=[{'id','item_id'}, {'title'}, {'link','url'}, {'image_link','image_url'}, {'price'}]
+          ok=all(bool(fields & group) for group in required_any)
+          raise SystemExit(0 if ok else 1)
+          PY
               then
                 mv /tmp/boschino-sk-candidate.tsv /tmp/boschino-sk-source.tsv
                 echo "$source_url" > /tmp/boschino-sk-source-url.txt
@@ -61,94 +61,93 @@ PY
           set -euo pipefail
           mkdir -p openai
           python - <<'PY'
-import csv, re
-from decimal import Decimal, InvalidOperation
+          import csv, re
 
-src='/tmp/boschino-sk-source.tsv'
-out='openai/boschino-sk-ads-full.txt'
-fields=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
+          src='/tmp/boschino-sk-source.tsv'
+          out='openai/boschino-sk-ads-full.txt'
+          fields=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
 
-def clean(v):
-    return str(v or '').replace('\x00','').strip()
+          def clean(v):
+              return str(v or '').replace('\x00','').strip()
 
-def normalized_price(row):
-    raw=clean(row.get('sale_price')) or clean(row.get('price'))
-    if not raw:
-        return ''
-    if re.search(r'\b[A-Z]{3}\b', raw):
-        return raw
-    m=re.fullmatch(r'\s*([0-9]+(?:[.,][0-9]+)?)\s*', raw)
-    if m:
-        return m.group(1).replace(',', '.') + ' EUR'
-    return raw
+          def normalized_price(row):
+              raw=clean(row.get('sale_price')) or clean(row.get('price'))
+              if not raw:
+                  return ''
+              if re.search(r'\b[A-Z]{3}\b', raw):
+                  return raw
+              m=re.fullmatch(r'\s*([0-9]+(?:[.,][0-9]+)?)\s*', raw)
+              if m:
+                  return m.group(1).replace(',', '.') + ' EUR'
+              return raw
 
-def normalized_availability(v):
-    s=clean(v).lower().replace('-', '_').replace(' ', '_')
-    if s in {'in_stock','instock'} or 'sklad' in s:
-        return 'in_stock'
-    return 'out_of_stock'
+          def normalized_availability(v):
+              s=clean(v).lower().replace('-', '_').replace(' ', '_')
+              if s in {'in_stock','instock'} or 'sklad' in s:
+                  return 'in_stock'
+              return 'out_of_stock'
 
-seen=set()
-rows=[]
-with open(src, encoding='utf-8-sig', newline='') as f:
-    r=csv.DictReader(f, delimiter='\t')
-    for row in r:
-        item_id=clean(row.get('item_id') or row.get('id'))
-        if not item_id or item_id in seen:
-            continue
-        title=clean(row.get('title'))
-        url=clean(row.get('url') or row.get('link'))
-        image=clean(row.get('image_url') or row.get('image_link'))
-        price=normalized_price(row)
-        if not (title and url and image and price):
-            continue
-        if url.startswith('https://boschino.cz/'):
-            url='https://boschino.sk/' + url.split('https://boschino.cz/',1)[1]
-        description=clean(row.get('description')) or title
-        brand=clean(row.get('brand'))
-        if brand in {'BSH / Bosch','Boschino.cz','Boschino.sk'}:
-            brand='Bosch'
-        elif brand == 'BSH - Bosch, Siemens':
-            brand='Bosch | Siemens'
-        gtin=clean(row.get('gtin'))
-        mpn=clean(row.get('mpn'))
-        if not mpn:
-            m=re.search(r'(?<!\d)(\d{8})(?!\d)', title)
-            if m:
-                mpn=m.group(1)
-        rows.append({
-            'item_id':item_id,
-            'title':title,
-            'description':description,
-            'url':url,
-            'brand':brand,
-            'image_url':image,
-            'price':price,
-            'availability':normalized_availability(row.get('availability')),
-            'is_eligible_search':'true',
-            'is_eligible_checkout':'false',
-            'is_ads_eligible':'true',
-            'seller_name':'Boschino.sk',
-            'seller_url':'https://boschino.sk',
-            'gtin':gtin,
-            'mpn':mpn,
-            'product_category':clean(row.get('product_type') or row.get('product_category') or row.get('google_product_category')),
-            'condition':clean(row.get('condition')) or 'new',
-        })
-        seen.add(item_id)
+          seen=set()
+          rows=[]
+          with open(src, encoding='utf-8-sig', newline='') as f:
+              r=csv.DictReader(f, delimiter='\t')
+              for row in r:
+                  item_id=clean(row.get('item_id') or row.get('id'))
+                  if not item_id or item_id in seen:
+                      continue
+                  title=clean(row.get('title'))
+                  url=clean(row.get('url') or row.get('link'))
+                  image=clean(row.get('image_url') or row.get('image_link'))
+                  price=normalized_price(row)
+                  if not (title and url and image and price):
+                      continue
+                  if url.startswith('https://boschino.cz/'):
+                      url='https://boschino.sk/' + url.split('https://boschino.cz/',1)[1]
+                  description=clean(row.get('description')) or title
+                  brand=clean(row.get('brand'))
+                  if brand in {'BSH / Bosch','Boschino.cz','Boschino.sk'}:
+                      brand='Bosch'
+                  elif brand == 'BSH - Bosch, Siemens':
+                      brand='Bosch | Siemens'
+                  gtin=clean(row.get('gtin'))
+                  mpn=clean(row.get('mpn'))
+                  if not mpn:
+                      m=re.search(r'(?<!\d)(\d{8})(?!\d)', title)
+                      if m:
+                          mpn=m.group(1)
+                  rows.append({
+                      'item_id':item_id,
+                      'title':title,
+                      'description':description,
+                      'url':url,
+                      'brand':brand,
+                      'image_url':image,
+                      'price':price,
+                      'availability':normalized_availability(row.get('availability')),
+                      'is_eligible_search':'true',
+                      'is_eligible_checkout':'false',
+                      'is_ads_eligible':'true',
+                      'seller_name':'Boschino.sk',
+                      'seller_url':'https://boschino.sk',
+                      'gtin':gtin,
+                      'mpn':mpn,
+                      'product_category':clean(row.get('product_type') or row.get('product_category') or row.get('google_product_category')),
+                      'condition':clean(row.get('condition')) or 'new',
+                  })
+                  seen.add(item_id)
 
-if len(rows) < 1000:
-    raise SystemExit(f'Refusing to publish suspiciously small SK feed: {len(rows)} rows')
+          if len(rows) < 1000:
+              raise SystemExit(f'Refusing to publish suspiciously small SK feed: {len(rows)} rows')
 
-with open(out,'w',encoding='utf-8',newline='') as f:
-    w=csv.DictWriter(f,fieldnames=fields,delimiter='\t',lineterminator='\n')
-    w.writeheader()
-    w.writerows(rows)
+          with open(out,'w',encoding='utf-8',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields,delimiter='\t',lineterminator='\n')
+              w.writeheader()
+              w.writerows(rows)
 
-in_stock=sum(1 for x in rows if x['availability']=='in_stock')
-out_stock=len(rows)-in_stock
-print(f'Validated {len(rows)} unique SK products; in_stock={in_stock}; out_of_stock={out_stock}')
-PY
+          in_stock=sum(1 for x in rows if x['availability']=='in_stock')
+          out_stock=len(rows)-in_stock
+          print(f'Validated {len(rows)} unique SK products; in_stock={in_stock}; out_of_stock={out_stock}')
+          PY
 
       - name: Commit published SK feed
         shell: bash
