@@ -30,7 +30,6 @@ jobs:
           import json
           import re
           import time
-          import urllib.parse
           import urllib.request
           from html.parser import HTMLParser
 
@@ -43,7 +42,8 @@ jobs:
                   super().__init__()
                   self.parts=[]
               def handle_data(self, data):
-                  if data and data.strip(): self.parts.append(data.strip())
+                  if data and data.strip():
+                      self.parts.append(data.strip())
 
           def strip_html(value):
               p=TextExtractor()
@@ -71,33 +71,32 @@ jobs:
               raise last
 
           products=[]
-          since_id=0
-          page=0
           seen_product_ids=set()
+          page=1
           while True:
-              page += 1
-              url=f'{BASE}/products.json?limit=250&since_id={since_id}'
+              url=f'{BASE}/products.json?limit=250&page={page}'
               payload=get_json(url)
               batch=payload.get('products') or []
-              print(f'page={page} products={len(batch)} since_id={since_id}')
+              print(f'page={page} products={len(batch)}')
               if not batch:
                   break
+
               new=0
-              max_id=since_id
               for product in batch:
-                  pid=int(product.get('id') or 0)
-                  if pid <= 0 or pid in seen_product_ids:
+                  pid=str(product.get('id') or '').strip()
+                  if not pid or pid in seen_product_ids:
                       continue
                   seen_product_ids.add(pid)
                   products.append(product)
                   new += 1
-                  max_id=max(max_id,pid)
-              if new == 0 or max_id <= since_id:
+
+              if new == 0:
+                  print('No new product IDs; pagination ended.')
                   break
-              since_id=max_id
               if len(batch) < 250:
                   break
-              if page >= 1000:
+              page += 1
+              if page > 1000:
                   raise SystemExit('Safety stop: too many pages')
               time.sleep(0.15)
 
@@ -107,6 +106,7 @@ jobs:
 
           rows=[]
           seen_ids=set()
+          sample=[]
           for product in products:
               handle=str(product.get('handle') or '').strip()
               title=str(product.get('title') or '').strip()
@@ -136,16 +136,15 @@ jobs:
                   vtitle=str(variant.get('title') or '').strip()
                   final_title=title if not vtitle or vtitle == 'Default Title' else f'{title} - {vtitle}'
                   price=str(variant.get('price') or '').strip()
-                  compare=str(variant.get('compare_at_price') or '').strip()
+                  if not price:
+                      continue
                   try:
-                      effective=price
-                      if compare and float(price) < float(compare):
-                          effective=price
-                      if not effective:
-                          continue
-                      price_value=f'{float(effective):.2f} EUR'
+                      price_num=float(price)
                   except Exception:
                       continue
+                  if price_num <= 0:
+                      continue
+                  price_value=f'{price_num:.2f} EUR'
 
                   vimage=product_image
                   fi=variant.get('featured_image')
@@ -159,15 +158,16 @@ jobs:
                   mpn=sku
                   if not mpn:
                       m=re.search(r'(?<!\d)(\d{8})(?!\d)', final_title)
-                      if m: mpn=m.group(1)
+                      if m:
+                          mpn=m.group(1)
 
                   available=bool(variant.get('available'))
-                  url=f'{BASE}/products/{handle}'
-                  rows.append({
+                  product_url=f'{BASE}/products/{handle}'
+                  row={
                       'item_id':item_id,
                       'title':final_title,
                       'description':description,
-                      'url':url,
+                      'url':product_url,
                       'brand':brand,
                       'image_url':vimage,
                       'price':price_value,
@@ -181,15 +181,22 @@ jobs:
                       'mpn':mpn,
                       'product_category':product_type,
                       'condition':'new'
-                  })
+                  }
+                  rows.append(row)
                   seen_ids.add(item_id)
+                  if len(sample) < 5:
+                      sample.append((item_id, final_title, price_value, available, product_url))
 
           if len(rows) < 1000:
               raise SystemExit(f'Refusing suspiciously small transformed feed: {len(rows)} rows')
 
+          for x in sample:
+              print('SAMPLE', x)
+
           with open(OUT,'w',encoding='utf-8',newline='') as f:
               w=csv.DictWriter(f,fieldnames=FIELDS,delimiter='\t',lineterminator='\n')
-              w.writeheader(); w.writerows(rows)
+              w.writeheader()
+              w.writerows(rows)
 
           ins=sum(1 for r in rows if r['availability']=='in_stock')
           print(f'Validated {len(rows)} unique SK variants; in_stock={ins}; out_of_stock={len(rows)-ins}')
