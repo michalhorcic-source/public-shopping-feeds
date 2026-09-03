@@ -1,0 +1,30 @@
+name: Package Boschino SK feed
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/package-boschino-sk-feed.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s openai/boschino-sk-ads-full.txt
+          test "$(($(wc -l < openai/boschino-sk-ads-full.txt)-1))" -eq 51352
+          sha256sum openai/boschino-sk-ads-full.txt
+      - name: Upload SK feed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boschino-sk-ads-full
+          path: openai/boschino-sk-ads-full.txt
+          compression-level: 9
+          retention-days: 7
