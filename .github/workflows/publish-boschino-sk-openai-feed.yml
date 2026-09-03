@@ -1,173 +1,89 @@
-name: Publish Boschino SK OpenAI Ads feed
+name: Publish Boschino SK OpenAI Ads feed snapshot
 
 on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/publish-boschino-sk-openai-feed.yml'
-  workflow_dispatch:
+      - '.feed-staging/boschino-sk-ads-full.txt.xz'
 
 permissions:
   contents: write
 
 jobs:
-  publish-sk-feed:
+  publish-feed:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Regenerate full Boschino SK Merchant feed
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fL --retry 1 --connect-timeout 20 --max-time 1200 \
-            'https://boschino-feed-worker.michal-horcic.workers.dev/admin/regenerate-all' \
-            -o /tmp/boschino-sk-regenerate.json
-
-          python - <<'PY'
-          import json
-          p='/tmp/boschino-sk-regenerate.json'
-          with open(p, encoding='utf-8') as f:
-              data=json.load(f)
-          print(data)
-          rows=int(data.get('rows') or 0)
-          products=int(data.get('products') or 0)
-          if not data.get('ok') or rows < 1000:
-              raise SystemExit(f'Full SK regeneration failed or too small: products={products}, rows={rows}')
-          print(f'Full SK regeneration OK: products={products}, rows={rows}')
-          PY
-
-      - name: Fetch current Boschino SK Merchant feed
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_url='https://boschino-feed-worker.michal-horcic.workers.dev/merchant/sk/products.tsv'
-          curl -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 300 \
-            "$source_url" -o /tmp/boschino-sk-source.tsv
-
-          python - <<'PY'
-          import csv
-          p='/tmp/boschino-sk-source.tsv'
-          with open(p, encoding='utf-8-sig', newline='') as f:
-              r=csv.DictReader(f, delimiter='\t')
-              fields=set(r.fieldnames or [])
-              rows=sum(1 for _ in r)
-          required_any=[{'id','item_id'}, {'title'}, {'link','url'}, {'image_link','image_url'}, {'price'}]
-          ok=all(bool(fields & group) for group in required_any)
-          if not ok:
-              raise SystemExit(f'Unsupported SK feed header: {sorted(fields)}')
-          if rows < 1000:
-              raise SystemExit(f'Refusing suspiciously small SK source feed: {rows} rows')
-          print(f'SK source rows={rows}')
-          PY
-
-      - name: Transform to OpenAI Ads feed schema
+      - name: Decompress and validate SK full feed
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p openai
+          xz -dc .feed-staging/boschino-sk-ads-full.txt.xz > openai/boschino-sk-ads-full.txt
+
           python - <<'PY'
-          import csv, re
+          import csv
+          from urllib.parse import urlparse
 
-          src='/tmp/boschino-sk-source.tsv'
-          out='openai/boschino-sk-ads-full.txt'
-          fields=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
+          path='openai/boschino-sk-ads-full.txt'
+          expected=['item_id','title','description','url','brand','image_url','price','availability','is_eligible_search','is_eligible_checkout','is_ads_eligible','seller_name','seller_url','gtin','mpn','product_category','condition']
 
-          def clean(v):
-              return str(v or '').replace('\x00','').strip()
-
-          def normalized_price(row):
-              raw=clean(row.get('sale_price')) or clean(row.get('price'))
-              if not raw:
-                  return ''
-              if re.search(r'\b[A-Z]{3}\b', raw):
-                  return raw
-              m=re.fullmatch(r'\s*([0-9]+(?:[.,][0-9]+)?)\s*', raw)
-              if m:
-                  return m.group(1).replace(',', '.') + ' EUR'
-              return raw
-
-          def normalized_availability(v):
-              s=clean(v).lower().replace('-', '_').replace(' ', '_')
-              if s in {'in_stock','instock'} or 'sklad' in s:
-                  return 'in_stock'
-              return 'out_of_stock'
-
-          seen=set()
-          rows=[]
-          with open(src, encoding='utf-8-sig', newline='') as f:
+          with open(path, encoding='utf-8', newline='') as f:
               r=csv.DictReader(f, delimiter='\t')
+              if r.fieldnames != expected:
+                  raise SystemExit(f'Unexpected columns: {r.fieldnames}')
+
+              ids=set()
+              rows=0
+              eur_rows=0
+              sk_url_rows=0
+              in_stock=0
+              out_of_stock=0
+
               for row in r:
-                  item_id=clean(row.get('item_id') or row.get('id'))
-                  if not item_id or item_id in seen:
-                      continue
-                  title=clean(row.get('title'))
-                  url=clean(row.get('url') or row.get('link'))
-                  image=clean(row.get('image_url') or row.get('image_link'))
-                  price=normalized_price(row)
-                  if not (title and url and image and price):
-                      continue
-                  if url.startswith('https://boschino.cz/'):
-                      url='https://boschino.sk/' + url.split('https://boschino.cz/',1)[1]
-                  description=clean(row.get('description')) or title
-                  brand=clean(row.get('brand'))
-                  if brand in {'BSH / Bosch','Boschino.cz','Boschino.sk'}:
-                      brand='Bosch'
-                  elif brand == 'BSH - Bosch, Siemens':
-                      brand='Bosch | Siemens'
-                  gtin=clean(row.get('gtin'))
-                  mpn=clean(row.get('mpn'))
-                  if not mpn:
-                      m=re.search(r'(?<!\d)(\d{8})(?!\d)', title)
-                      if m:
-                          mpn=m.group(1)
-                  rows.append({
-                      'item_id':item_id,
-                      'title':title,
-                      'description':description,
-                      'url':url,
-                      'brand':brand,
-                      'image_url':image,
-                      'price':price,
-                      'availability':normalized_availability(row.get('availability')),
-                      'is_eligible_search':'true',
-                      'is_eligible_checkout':'false',
-                      'is_ads_eligible':'true',
-                      'seller_name':'Boschino.sk',
-                      'seller_url':'https://boschino.sk',
-                      'gtin':gtin,
-                      'mpn':mpn,
-                      'product_category':clean(row.get('product_type') or row.get('product_category') or row.get('google_product_category')),
-                      'condition':clean(row.get('condition')) or 'new',
-                  })
-                  seen.add(item_id)
+                  rows += 1
+                  for key in ('item_id','title','url','image_url','price'):
+                      if not row.get(key):
+                          raise SystemExit(f'Missing {key} at row {rows + 1}')
 
-          if len(rows) < 1000:
-              raise SystemExit(f'Refusing to publish suspiciously small SK feed: {len(rows)} rows')
+                  if row['item_id'] in ids:
+                      raise SystemExit(f'Duplicate item_id: {row["item_id"]}')
+                  ids.add(row['item_id'])
 
-          with open(out,'w',encoding='utf-8',newline='') as f:
-              w=csv.DictWriter(f,fieldnames=fields,delimiter='\t',lineterminator='\n')
-              w.writeheader()
-              w.writerows(rows)
+                  if 'EUR' in row['price'].upper():
+                      eur_rows += 1
 
-          in_stock=sum(1 for x in rows if x['availability']=='in_stock')
-          out_stock=len(rows)-in_stock
-          print(f'Validated {len(rows)} unique SK products; in_stock={in_stock}; out_of_stock={out_stock}')
+                  host=urlparse(row['url']).hostname or ''
+                  if host == 'boschino.sk' or host.endswith('.boschino.sk'):
+                      sk_url_rows += 1
+
+                  if row['availability'] == 'in_stock':
+                      in_stock += 1
+                  elif row['availability'] == 'out_of_stock':
+                      out_of_stock += 1
+                  else:
+                      raise SystemExit(f'Unexpected availability at row {rows + 1}: {row["availability"]}')
+
+              if rows < 1000:
+                  raise SystemExit(f'Refusing suspiciously small SK feed: {rows} rows')
+              if eur_rows != rows:
+                  raise SystemExit(f'Non-EUR prices found: EUR rows {eur_rows}/{rows}')
+              if sk_url_rows != rows:
+                  raise SystemExit(f'Non-boschino.sk URLs found: SK URL rows {sk_url_rows}/{rows}')
+
+              print(f'Validated {rows} unique SK products; in_stock={in_stock}; out_of_stock={out_of_stock}')
           PY
 
-      - name: Commit published SK feed
+      - name: Publish feed and remove staging archive
         shell: bash
         run: |
           set -euo pipefail
+          rm -f .feed-staging/boschino-sk-ads-full.txt.xz
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add openai/boschino-sk-ads-full.txt
-          if git diff --cached --quiet; then
-            echo 'SK feed unchanged.'
-            exit 0
-          fi
-          git commit -m 'Publish Boschino SK OpenAI Ads feed [skip ci]'
+          git add -A openai/boschino-sk-ads-full.txt .feed-staging
+          git commit -m 'Publish full Boschino SK OpenAI Ads feed snapshot [skip ci]'
           git push origin HEAD:main
