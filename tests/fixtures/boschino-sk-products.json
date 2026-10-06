@@ -1,0 +1,33 @@
+[
+  {
+    "offerId": "SKU-SK-1",
+    "dataSource": "accounts/5802327553/dataSources/10673787617",
+    "productAttributes": {
+      "title": "Slovenský náhradný diel",
+      "description": "Originálny náhradný diel pre spotrebič Bosch.",
+      "link": "https://boschino.sk/products/sku-sk-1",
+      "brand": "Bosch",
+      "imageLink": "https://boschino.sk/images/sku-sk-1.jpg",
+      "availability": "IN_STOCK",
+      "price": {"amountMicros": "1234000000", "currencyCode": "EUR"},
+      "salePrice": {"amount": "999", "currencyCode": "EUR"},
+      "gtin": "4006381333931",
+      "mpn": "SKU-SK-1"
+    },
+    "productStatus": {"destinationStatuses": [{"reportingContext": "SHOPPING_ADS", "approvedCountries": ["SK"]}]}
+  },
+  {
+    "offerId": "SKU-SK-CZ",
+    "dataSource": "accounts/5802327553/dataSources/10673787617",
+    "productAttributes": {
+      "title": "Nesprávny trh",
+      "description": "Popis",
+      "link": "https://boschino.cz/products/sku-sk-cz",
+      "brand": "Bosch",
+      "imageLink": "https://boschino.cz/images/sku-sk-cz.jpg",
+      "availability": "IN_STOCK",
+      "price": {"amount": "55", "currencyCode": "EUR"}
+    },
+    "productStatus": {"destinationStatuses": [{"reportingContext": "SHOPPING_ADS", "approvedCountries": ["CZ"]}]}
+  }
+]

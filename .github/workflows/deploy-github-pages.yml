@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'openai/boschino-ads-full.csv'
+      - 'openai/boschino-ads-sk-full.csv'
       - '.github/workflows/deploy-github-pages.yml'
   workflow_dispatch:
 
