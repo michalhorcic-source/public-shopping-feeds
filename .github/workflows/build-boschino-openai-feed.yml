@@ -46,6 +46,7 @@ jobs:
           python scripts/build_boschino_cz_feed.py \
             --output openai/boschino-ads-full.txt \
             --state openai/boschino-ads-cz-state.json
+          cp openai/boschino-ads-full.txt openai/boschino-ads-full.csv
           python tests/test_boschino_cz_feed.py
           git diff --check
 
@@ -54,12 +55,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet -- openai/boschino-ads-full.txt openai/boschino-ads-cz-state.json; then
+          if git diff --quiet -- openai/boschino-ads-full.txt openai/boschino-ads-full.csv openai/boschino-ads-cz-state.json; then
             echo 'No feed changes to publish.'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add openai/boschino-ads-full.txt openai/boschino-ads-cz-state.json
+          git add openai/boschino-ads-full.txt openai/boschino-ads-full.csv openai/boschino-ads-cz-state.json
           git commit -m 'Update Boschino CZ ChatGPT Ads feed [skip ci]'
           git push origin HEAD:main
