@@ -12,7 +12,12 @@
       "price": {"amountMicros": "1234000000", "currencyCode": "EUR"},
       "salePrice": {"amount": "999", "currencyCode": "EUR"},
       "gtin": "4006381333931",
-      "mpn": "SKU-SK-1"
+      "mpn": "SKU-SK-1",
+      "productTypes": ["Náhradné diely", "Práčky"],
+      "customLabel1": "seasonal",
+      "customLabel2": "priority-b",
+      "customLabel3": "warehouse-sk",
+      "customLabel4": "margin-medium"
     },
     "productStatus": {"destinationStatuses": [{"reportingContext": "SHOPPING_ADS", "approvedCountries": ["SK"]}]}
   },

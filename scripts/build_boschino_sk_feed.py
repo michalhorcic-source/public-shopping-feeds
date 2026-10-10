@@ -16,7 +16,7 @@ from typing import Any, Iterable
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
-FIELDS = ["item_id", "title", "description", "url", "brand", "seller_name", "image_url", "availability", "price", "is_ads_eligible", "sale_price", "gtin", "mpn"]
+FIELDS = ["item_id", "title", "description", "url", "brand", "seller_name", "image_url", "availability", "price", "is_ads_eligible", "sale_price", "gtin", "mpn", "product_types", "custom_label_1", "custom_label_2", "custom_label_3", "custom_label_4"]
 ACCOUNT = "5802327553"
 DATA_SOURCE = "accounts/5802327553/dataSources/10673787617"
 API_URL = f"https://merchantapi.googleapis.com/products/v1/accounts/{ACCOUNT}/products"
@@ -72,6 +72,11 @@ def valid_gtin(raw: Any) -> str:
     return code if (10 - check % 10) % 10 == int(code[-1]) else ""
 
 
+def product_types(raw: Any) -> str:
+    values = raw if isinstance(raw, list) else [raw]
+    return "|".join(item for item in (clean(value) for value in values) if item)
+
+
 def is_shopping_ads_sk(product: dict[str, Any]) -> bool:
     status = value(product, "productStatus", "product_status") or {}
     destinations = value(status, "destinationStatuses", "destination_statuses") or []
@@ -97,7 +102,7 @@ def transform(product: dict[str, Any]) -> dict[str, str]:
     if not isinstance(gtin_values, list):
         gtin_values = [gtin_values]
     gtin = next((candidate for candidate in (valid_gtin(item) for item in gtin_values) if candidate), "")
-    return {"item_id": item_id, "title": title, "description": description, "url": url, "brand": brand, "seller_name": "Boschino.sk", "image_url": image_url, "availability": AVAILABILITY[availability], "price": price, "is_ads_eligible": "true", "sale_price": sale_price, "gtin": gtin, "mpn": clean(value(attributes, "mpn"))}
+    return {"item_id": item_id, "title": title, "description": description, "url": url, "brand": brand, "seller_name": "Boschino.sk", "image_url": image_url, "availability": AVAILABILITY[availability], "price": price, "is_ads_eligible": "true", "sale_price": sale_price, "gtin": gtin, "mpn": clean(value(attributes, "mpn")), "product_types": product_types(value(attributes, "productTypes", "product_types")), "custom_label_1": clean(value(attributes, "customLabel1", "custom_label_1")), "custom_label_2": clean(value(attributes, "customLabel2", "custom_label_2")), "custom_label_3": clean(value(attributes, "customLabel3", "custom_label_3")), "custom_label_4": clean(value(attributes, "customLabel4", "custom_label_4"))}
 
 
 def fetch_products(token: str) -> list[dict[str, Any]]:

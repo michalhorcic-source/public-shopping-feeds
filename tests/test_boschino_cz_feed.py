@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts" / "build_boschino_cz_feed.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "boschino-cz-products.json"
-FIELDS = ["item_id", "title", "description", "url", "brand", "seller_name", "image_url", "availability", "price", "is_ads_eligible", "sale_price", "gtin", "mpn"]
+FIELDS = ["item_id", "title", "description", "url", "brand", "seller_name", "image_url", "availability", "price", "is_ads_eligible", "sale_price", "gtin", "mpn", "product_types", "custom_label_1", "custom_label_2", "custom_label_3", "custom_label_4"]
 SPEC = importlib.util.spec_from_file_location("boschino_builder", BUILDER)
 BUILDER_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BUILDER_MODULE)
@@ -22,7 +22,14 @@ class BoschinoCzFeedTest(unittest.TestCase):
             result = subprocess.run([sys.executable, str(BUILDER), "--offline-products", str(FIXTURE), "--output", str(output), "--state", str(state)], capture_output=True, text=True, check=True)
             self.assertIn("Validated 1 eligible CZ Merchant offers", result.stdout); self.assertFalse(output.read_bytes().startswith(b"\xef\xbb\xbf"))
             with output.open(encoding="utf-8", newline="") as handle: reader = csv.DictReader(handle); rows = list(reader); self.assertEqual(FIELDS, reader.fieldnames)
-            self.assertEqual(1, len(rows)); self.assertEqual("SKU-1", rows[0]["item_id"]); self.assertEqual("1234.00 CZK", rows[0]["price"]); self.assertEqual("999.00 CZK", rows[0]["sale_price"]); self.assertEqual("4006381333931", rows[0]["gtin"]); self.assertEqual("in_stock", rows[0]["availability"]); self.assertEqual(["SKU-1"], json.loads(state.read_text(encoding="utf-8"))["active_item_ids"])
+            self.assertEqual(1, len(rows)); self.assertEqual("SKU-1", rows[0]["item_id"]); self.assertEqual("1234.00 CZK", rows[0]["price"]); self.assertEqual("999.00 CZK", rows[0]["sale_price"]); self.assertEqual("4006381333931", rows[0]["gtin"]); self.assertEqual("in_stock", rows[0]["availability"]); self.assertEqual("Náhradní díly|Pračky", rows[0]["product_types"]); self.assertEqual("seasonal", rows[0]["custom_label_1"]); self.assertEqual("priority-a", rows[0]["custom_label_2"]); self.assertEqual("warehouse-cz", rows[0]["custom_label_3"]); self.assertEqual("margin-high", rows[0]["custom_label_4"]); self.assertEqual(["SKU-1"], json.loads(state.read_text(encoding="utf-8"))["active_item_ids"])
+
+    def test_missing_optional_merchant_taxonomy_and_labels_are_blank(self):
+        product = json.loads(FIXTURE.read_text(encoding="utf-8"))[0]
+        for name in ("productTypes", "customLabel1", "customLabel2", "customLabel3", "customLabel4"): product["productAttributes"].pop(name)
+        row = BUILDER_MODULE.transform(product)
+        self.assertEqual("", row["product_types"])
+        self.assertEqual(["", "", "", ""], [row[f"custom_label_{index}"] for index in range(1, 5)])
 
     def test_newly_ineligible_active_item_becomes_tombstone(self):
         eligible = json.loads(FIXTURE.read_text(encoding="utf-8"))[0]
